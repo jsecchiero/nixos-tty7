@@ -1,0 +1,266 @@
+#!/bin/bash
+# NixOS TTY7 Setup Script
+# https://github.com/jsecchiero/nixos-tty7
+#
+# This script sets up a NixOS container inside Ubuntu Server with full device
+# passthrough for GPU, audio, input devices, and webcams.
+#
+# Usage (production):
+#   curl -L https://raw.githubusercontent.com/jsecchiero/nixos-tty7/main/install | sudo bash
+#
+# Usage (test mode - all env vars are optional):
+#   NIXLXC_LOCAL_FILES=/mnt/shared  - use local config files instead of downloading
+#   NIXLXC_ROOTFS_DISK=/dev/...     - mount a pre-built rootfs disk instead of downloading
+#   NIXLXC_SKIP_APT=1               - skip apt-get install (LXC already available)
+#   NIXLXC_SKIP_SYSTEMD=1           - skip systemd service setup and getty management
+#   NIXLXC_SKIP_NIXOS_REBUILD=1     - skip nixos-rebuild (rootfs already configured)
+#   NIXLXC_FLAKE=github:user/repo#host - use a custom flake instead of the default
+#
+# Requirements:
+#   - Ubuntu Server 24.04 (or compatible)
+#   - Root privileges
+#   - Internet connection (unless using local overrides)
+
+set -euo pipefail
+
+REPO_URL="https://raw.githubusercontent.com/jsecchiero/nixos-tty7/main"
+NIXOS_ROOTFS_URL="https://github.com/tfc/nspawn-nixos/releases/download/v1.3.0/nixos-system-x86_64-linux.tar.xz"
+CONTAINER_NAME="nixos"
+ROOTFS_PATH="/var/lib/machines/nixos"
+LXC_CONFIG_PATH="/var/lib/lxc/nixos"
+
+# Test mode overrides (all optional)
+LOCAL_FILES="${NIXLXC_LOCAL_FILES:-}"
+ROOTFS_DISK="${NIXLXC_ROOTFS_DISK:-}"
+SKIP_APT="${NIXLXC_SKIP_APT:-}"
+SKIP_SYSTEMD="${NIXLXC_SKIP_SYSTEMD:-}"
+SKIP_NIXOS_REBUILD="${NIXLXC_SKIP_NIXOS_REBUILD:-}"
+NIXOS_FLAKE="${NIXLXC_FLAKE:-github:jsecchiero/nixos-tty7#nixos}"
+echo "========================================"
+echo "NixOS TTY7 Setup"
+echo "========================================"
+echo ""
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: This script must be run as root"
+    exit 1
+fi
+
+# Check for Ubuntu (warn only)
+if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
+    echo "Warning: This script is designed for Ubuntu. Proceeding anyway..."
+fi
+
+# ── Step 1: Install LXC ──────────────────────────────────────────────────────
+echo "[1/9] Installing LXC..."
+if [ -n "$SKIP_APT" ]; then
+    which lxc-start >/dev/null || { echo "ERROR: LXC not found and SKIP_APT is set"; exit 1; }
+    echo "  Skipped (NIXLXC_SKIP_APT set, LXC already available)"
+else
+    apt-get update -qq
+    apt-get install -y -qq lxc curl xz-utils
+fi
+
+# ── Step 2: NixOS rootfs ─────────────────────────────────────────────────────
+echo "[2/9] Setting up NixOS rootfs..."
+mkdir -p "$ROOTFS_PATH"
+if [ ! -d "$ROOTFS_PATH/nix" ]; then
+    if [ -n "$ROOTFS_DISK" ]; then
+        # Test mode: mount pre-built rootfs disk image
+        echo "  Mounting pre-built rootfs disk ($ROOTFS_DISK)..."
+        if timeout 30 mount -o rw,noatime,nodiratime "$ROOTFS_DISK" "$ROOTFS_PATH"; then
+            echo "  Mounted NixOS rootfs from disk"
+        else
+            echo "  ERROR: mount failed or timed out"
+            exit 1
+        fi
+    elif [ -e /dev/disk/by-label/NIXOS_ROOTFS ]; then
+        # Auto-detect labeled rootfs disk (e.g. in VM tests)
+        echo "  Mounting rootfs disk (label: NIXOS_ROOTFS)..."
+        if timeout 30 mount -o rw,noatime,nodiratime /dev/disk/by-label/NIXOS_ROOTFS "$ROOTFS_PATH"; then
+            echo "  Mounted NixOS rootfs from labeled disk"
+        else
+            echo "  ERROR: mount failed or timed out"
+            exit 1
+        fi
+    else
+        # Production: download and extract
+        curl -fsSL "$NIXOS_ROOTFS_URL" | tar -xJ -C "$ROOTFS_PATH"
+        echo "  Downloaded and extracted NixOS rootfs"
+    fi
+else
+    echo "  NixOS rootfs already exists, skipping"
+fi
+
+# Ensure /nix/var hierarchy exists for nix-daemon
+# The nix-daemon.socket and nix-daemon.service have
+# ConditionPathIsReadWrite=/nix/var/nix/daemon-socket which causes them
+# to silently skip if this directory is missing
+mkdir -p "$ROOTFS_PATH/nix/var/nix/daemon-socket"
+mkdir -p "$ROOTFS_PATH/nix/var/nix/db"
+mkdir -p "$ROOTFS_PATH/nix/var/nix/gcroots/auto"
+mkdir -p "$ROOTFS_PATH/nix/var/nix/gcroots/per-user"
+mkdir -p "$ROOTFS_PATH/nix/var/nix/profiles/per-user"
+mkdir -p "$ROOTFS_PATH/nix/var/nix/temproots"
+mkdir -p "$ROOTFS_PATH/nix/var/nix/userpool"
+mkdir -p "$ROOTFS_PATH/nix/var/log/nix/drvs"
+
+# ── Step 3: LXC container configuration ──────────────────────────────────────
+echo "[3/9] Creating LXC container configuration..."
+mkdir -p "$LXC_CONFIG_PATH"
+if [ -n "$LOCAL_FILES" ] && [ -f "$LOCAL_FILES/lxc-container.conf" ]; then
+    cp "$LOCAL_FILES/lxc-container.conf" "$LXC_CONFIG_PATH/config"
+    echo "  Using local LXC configuration"
+else
+    curl -fsSL "$REPO_URL/host/lxc-container.conf" -o "$LXC_CONFIG_PATH/config"
+    echo "  Downloaded LXC configuration"
+fi
+
+# ── Step 4: Mount hook script ─────────────────────────────────────────────────
+echo "[4/9] Creating mount hook script..."
+if [ -n "$LOCAL_FILES" ] && [ -f "$LOCAL_FILES/mount-hook.sh" ]; then
+    cp "$LOCAL_FILES/mount-hook.sh" "$LXC_CONFIG_PATH/mount-hook.sh"
+    echo "  Using local mount hook"
+else
+    curl -fsSL "$REPO_URL/host/mount-hook.sh" -o "$LXC_CONFIG_PATH/mount-hook.sh"
+    echo "  Downloaded mount hook"
+fi
+chmod +x "$LXC_CONFIG_PATH/mount-hook.sh"
+
+# ── Step 5: Systemd device-wait service ───────────────────────────────────────
+echo "[5/9] Creating systemd service to wait for devices..."
+if [ -n "$SKIP_SYSTEMD" ]; then
+    echo "  Skipped (NIXLXC_SKIP_SYSTEMD set)"
+else
+    if [ -n "$LOCAL_FILES" ] && [ -f "$LOCAL_FILES/lxc-wait-devices.service" ]; then
+        cp "$LOCAL_FILES/lxc-wait-devices.service" /etc/systemd/system/lxc-wait-devices.service
+        echo "  Using local service file"
+    else
+        curl -fsSL "$REPO_URL/host/lxc-wait-devices.service" -o /etc/systemd/system/lxc-wait-devices.service
+        echo "  Downloaded service file"
+    fi
+    systemctl daemon-reload
+    systemctl enable lxc-wait-devices.service
+fi
+
+# ── Step 6: Disable host getty on tty7 ────────────────────────────────────────
+echo "[6/9] Disabling host getty on tty7..."
+if [ -n "$SKIP_SYSTEMD" ]; then
+    echo "  Skipped (NIXLXC_SKIP_SYSTEMD set)"
+else
+    systemctl disable getty@tty7.service 2>/dev/null || true
+    systemctl mask getty@tty7.service
+    echo "  Disabled getty@tty7 on host (container will use it)"
+fi
+
+# ── Step 7: Allow unprivileged user namespaces ───────────────────────────────
+# Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor by default.
+# The Nix sandbox inside the LXC container requires user namespaces to function.
+echo "[7/9] Allowing unprivileged user namespaces..."
+if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+    sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 > /dev/null
+    mkdir -p /etc/sysctl.d
+    echo "kernel.apparmor_restrict_unprivileged_userns=0" > /etc/sysctl.d/99-nixos-lxc-userns.conf
+    echo "  Disabled AppArmor user namespace restriction (persistent)"
+else
+    echo "  Not needed (AppArmor userns restriction not present)"
+fi
+
+# ── Step 8: Start container ──────────────────────────────────────────────────
+echo "[8/9] Starting NixOS container..."
+
+# Ensure /dev/tty7 exists on the host for container passthrough
+if [ ! -e /dev/tty7 ]; then
+    echo "  Creating /dev/tty7 on host..."
+    mknod /dev/tty7 c 4 7
+    chmod 620 /dev/tty7
+    chown root:tty /dev/tty7
+fi
+
+lxc-start -n "$CONTAINER_NAME"
+sleep 3
+
+# Wait for container to be ready
+echo "  Waiting for container to be ready..."
+READY=0
+for i in $(seq 1 60); do
+    if lxc-attach -n "$CONTAINER_NAME" -- /run/current-system/sw/bin/true 2>/dev/null; then
+        READY=1
+        echo "  Container ready after ${i}s"
+        break
+    fi
+    sleep 1
+done
+
+if [ "$READY" -ne 1 ]; then
+    echo "ERROR: Container failed to become ready after 60s"
+    lxc-info -n "$CONTAINER_NAME" || true
+    exit 1
+fi
+
+# ── Step 9: Apply NixOS configuration ────────────────────────────────────────
+echo "[9/9] Applying NixOS configuration..."
+if [ -n "$SKIP_NIXOS_REBUILD" ]; then
+    echo "  Skipped (NIXLXC_SKIP_NIXOS_REBUILD set)"
+else
+    NIXOS_PATH="/run/current-system/sw/bin"
+
+    # Use "boot" instead of "switch" to avoid activating the new configuration
+    # live. The container shares the host's network namespace, and a live
+    # activation can flush the host's IP (network-setup scripts, systemd-networkd
+    # restarts, etc.). "boot" installs the config for next start, then we
+    # restart the container cleanly.
+    echo "  Using flake: $NIXOS_FLAKE"
+    lxc-attach -n "$CONTAINER_NAME" --set-var "PATH=$NIXOS_PATH" -- \
+        "$NIXOS_PATH/nixos-rebuild" boot \
+        --option sandbox false \
+        --flake "$NIXOS_FLAKE" --refresh
+
+    echo "  Restarting container to apply new configuration..."
+    # Use --kill to skip the old rootfs's graceful shutdown. The container
+    # shares the host's network namespace, and the old NixOS generation's
+    # shutdown sequence flushes the host's IP from its interfaces.
+    # This is only needed once — the new config (from nixos-rebuild boot)
+    # has networking fully disabled and won't touch interfaces.
+    lxc-stop --kill -n "$CONTAINER_NAME"
+    lxc-start -n "$CONTAINER_NAME"
+    READY=0
+    for i in $(seq 1 60); do
+        if lxc-attach -n "$CONTAINER_NAME" -- /run/current-system/sw/bin/true 2>/dev/null; then
+            READY=1
+            echo "  Container ready after ${i}s"
+            break
+        fi
+        sleep 1
+    done
+    if [ "$READY" -ne 1 ]; then
+        echo "ERROR: Container failed to become ready after restart"
+        lxc-info -n "$CONTAINER_NAME" || true
+        exit 1
+    fi
+fi
+
+echo ""
+echo "========================================"
+echo "Setup Complete!"
+echo "========================================"
+echo ""
+echo "NixOS container is now running with device passthrough."
+echo ""
+echo "Access methods:"
+echo "  1. Attach to container:  sudo lxc-attach -n nixos"
+echo "  2. Switch to tty7:       Ctrl+Alt+F7 (then log in)"
+echo ""
+echo "Default credentials:"
+echo "  Username: nixos"
+echo "  Password: nixos"
+echo ""
+echo "Sway is pre-installed and will start automatically when you"
+echo "log in on tty7 (Ctrl+Alt+F7)."
+echo ""
+echo "Container management:"
+echo "  Start:   sudo lxc-start -n nixos"
+echo "  Stop:    sudo lxc-stop -n nixos"
+echo "  Status:  sudo lxc-info -n nixos"
+echo ""

@@ -1,0 +1,40 @@
+[Unit]
+Description=Wait for devices before starting LXC containers
+Documentation=https://github.com/jsecchiero/nixos-tty7
+DefaultDependencies=no
+Before=lxc.service
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+# Wait for at least one GPU card OR sound device to be available
+# Uses generic glob patterns to support different hardware configurations
+# Timeout after 60 seconds if devices never appear
+ExecStart=/bin/bash -c '\
+    timeout=60; \
+    elapsed=0; \
+    echo "Waiting for GPU and sound devices..."; \
+    while [ $elapsed -lt $timeout ]; do \
+        gpu_ready=false; \
+        snd_ready=false; \
+        for card in /dev/dri/card*; do \
+            [ -e "$card" ] && gpu_ready=true && break; \
+        done; \
+        [ -e /dev/snd/controlC0 ] && snd_ready=true; \
+        if $gpu_ready && $snd_ready; then \
+            echo "Devices ready: GPU=$gpu_ready, Sound=$snd_ready"; \
+            sleep 1; \
+            exit 0; \
+        fi; \
+        sleep 0.5; \
+        elapsed=$((elapsed + 1)); \
+    done; \
+    echo "Warning: Timeout waiting for devices (GPU=$gpu_ready, Sound=$snd_ready)"; \
+    exit 0'
+RemainAfterExit=yes
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=lxc.service

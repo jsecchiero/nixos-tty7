@@ -453,6 +453,11 @@ let
   ubuntuLxcImageSimple = pkgs.runCommand "ubuntu-lxc-image-simple" {
     nativeBuildInputs = [ pkgs.qemu_test ];
     requiredSystemFeatures = [ "kvm" ];
+    # __noChroot is required because the QEMU VM inside this derivation
+    # needs both /dev/kvm (hardware acceleration) and network access
+    # (cloud-init runs apt-get to install LXC packages).
+    # The Nix sandbox blocks network via network namespaces, and
+    # extra-sandbox-paths can only expose devices, not network.
     __noChroot = true;
   } ''
     echo "=== Building Ubuntu + LXC image ==="

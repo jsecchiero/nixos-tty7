@@ -1,0 +1,35 @@
+name: Test Ubuntu LXC
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'DryRun'
+        required: true
+        default: 'false'
+
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    paths-ignore:
+      - '**.md'
+      - 'CODEOWNERS'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: nixbuild/nix-quick-install-action@v30
+      with:
+        nix_conf: |
+          sandbox = relaxed
+          system-features = nixos-test benchmark big-parallel kvm
+    - name: Restore Nix store
+      uses: nix-community/cache-nix-action/restore@v6
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+    - run: nix build .#test-ubuntu
+    - run: nix run .#test-ubuntu

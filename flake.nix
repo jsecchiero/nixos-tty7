@@ -86,6 +86,7 @@
             # Test runners
             test-ubuntu = attrs.ubuntuVm.testUbuntu;
             test-ubuntu-interactive = attrs.ubuntuVm.testInteractive;
+            test-ubuntu-clean = attrs.ubuntuVm.testClean;
           };
         });
     };

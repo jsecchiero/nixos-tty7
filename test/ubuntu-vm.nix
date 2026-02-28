@@ -619,6 +619,99 @@ let
     fi
   '';
 
+  # ── Cloud-init for clean (no-setup) mode ────────────────────────────────────
+  # Boots the Ubuntu+LXC image with no install or NixOS setup at all.
+  # The shared disk with scripts is still mounted so you can run install manually.
+  cloudInitCleanUserData = pkgs.writeText "clean-user-data" ''
+    #cloud-config
+    user: ubuntu
+    password: ubuntu
+    chpasswd:
+      expire: false
+    ssh_pwauth: true
+    write_files:
+      - path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+        content: |
+          PasswordAuthentication yes
+    runcmd:
+      - mkdir -p /mnt/shared
+      - |
+        for i in $(seq 1 30); do
+          if [ -e /dev/disk/by-label/SHARED ]; then
+            mount /dev/disk/by-label/SHARED /mnt/shared && break
+          elif [ -b /dev/vdb ]; then
+            mount /dev/vdb /mnt/shared && break
+          fi
+          sleep 1
+        done
+  '';
+
+  cloudInitCleanMetaData = pkgs.writeText "clean-meta-data" ''
+    instance-id: ubuntu-lxc-clean
+    local-hostname: ubuntu-clean
+  '';
+
+  cloudInitCleanIso = pkgs.runCommand "cloud-init-clean.iso" {
+    nativeBuildInputs = [ pkgs.cdrkit ];
+  } ''
+    mkdir -p iso
+    cp ${cloudInitCleanUserData} iso/user-data
+    cp ${cloudInitCleanMetaData} iso/meta-data
+    genisoimage -output $out -volid cidata -joliet -rock iso/
+  '';
+
+  # ── Clean test runner (no setup, just the Ubuntu image) ────────────────────
+  testClean = pkgs.writeShellScriptBin "test-ubuntu-clean" ''
+    set -euo pipefail
+
+    UBUNTU_IMAGE="''${1:-${ubuntuLxcImageSimple}/ubuntu-lxc.qcow2}"
+
+    if [ ! -f "$UBUNTU_IMAGE" ]; then
+      echo "Error: Ubuntu image not found at $UBUNTU_IMAGE"
+      echo "Build it first with: nix build .#ubuntu-lxc-image --option sandbox false"
+      exit 1
+    fi
+
+    echo "=== Ubuntu LXC Clean VM (no NixOS setup) ==="
+    echo "Ubuntu image: $UBUNTU_IMAGE"
+    echo ""
+
+    WORKDIR=$(mktemp -d)
+    echo "Working directory: $WORKDIR"
+    echo "Note: Directory will NOT be cleaned up automatically"
+    cd "$WORKDIR"
+
+    ${pkgs.qemu_test}/bin/qemu-img create -f qcow2 -b "$UBUNTU_IMAGE" -F qcow2 test.qcow2 20G
+
+    echo "Preparing shared disk with install script and config files..."
+    ${mkSharedDisk ""}
+
+    echo ""
+    echo "Starting clean VM (no automatic setup)..."
+    echo ""
+    echo "=========================================="
+    echo "CREDENTIALS: ubuntu / ubuntu"
+    echo "SSH: sshpass -p ubuntu ssh -p 2222 ubuntu@localhost"
+    echo "=========================================="
+    echo ""
+    echo "Install script and config files are at /mnt/shared/"
+    echo "To run the install manually:"
+    echo "  sudo cp /mnt/shared/install /root/install"
+    echo "  sudo chmod +x /root/install"
+    echo "  sudo /root/install"
+    echo "=========================================="
+    echo ""
+
+    ${pkgs.qemu}/bin/qemu-system-x86_64 \
+      -machine accel=kvm -cpu host -m 4096 -smp 2 \
+      -drive file=test.qcow2,format=qcow2,if=virtio \
+      -cdrom ${cloudInitCleanIso} \
+      -drive file=shared.img,format=raw,if=virtio \
+      -netdev user,id=net0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=net0 \
+      -vga virtio \
+      -display gtk -serial mon:stdio
+  '';
+
   # ── Interactive test runner ────────────────────────────────────────────────
   testInteractive = pkgs.writeShellScriptBin "test-ubuntu-interactive" ''
     set -euo pipefail
@@ -683,5 +776,5 @@ let
 
 in {
   inherit ubuntuLxcImageSimple;
-  inherit testUbuntu testInteractive;
+  inherit testUbuntu testInteractive testClean;
 }

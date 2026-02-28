@@ -68,3 +68,13 @@ Or connect via SSH:
 # credentials are `ubuntu / ubuntu`
 ssh ubuntu@127.1 -p 2222
 ```
+
+### Clean VM (no setup)
+
+Boots a bare Ubuntu+LXC VM with no automatic NixOS setup. Useful for testing the install script from a clean state:
+
+```bash
+nix run .#test-ubuntu-clean --option sandbox false
+```
+
+The install script and config files are available at `/mnt/shared/` inside the VM. Run it manually with `sudo /mnt/shared/install`.

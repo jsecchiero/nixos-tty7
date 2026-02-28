@@ -4,6 +4,10 @@ Run NixOS inside an LXC container with full hardware passthrough, taking place o
 
 ⚠️ This project is currently a POC. It is used daily, but no extensive testing has been done. ⚠️
 
+<p align="center">
+  <img src="doc/preview.gif" width="460" height="524">
+</p>
+
 ## Run
 
 ```bash

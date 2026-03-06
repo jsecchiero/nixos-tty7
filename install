@@ -53,7 +53,7 @@ if ! grep -q "Ubuntu" /etc/os-release 2>/dev/null; then
 fi
 
 # ── Step 1: Install LXC ──────────────────────────────────────────────────────
-echo "[1/9] Installing LXC..."
+echo "[1/10] Installing LXC..."
 if [ -n "$SKIP_APT" ]; then
     which lxc-start >/dev/null || { echo "ERROR: LXC not found and SKIP_APT is set"; exit 1; }
     echo "  Skipped (NIXLXC_SKIP_APT set, LXC already available)"
@@ -63,7 +63,7 @@ else
 fi
 
 # ── Step 2: NixOS rootfs ─────────────────────────────────────────────────────
-echo "[2/9] Setting up NixOS rootfs..."
+echo "[2/10] Setting up NixOS rootfs..."
 mkdir -p "$ROOTFS_PATH"
 if [ ! -d "$ROOTFS_PATH/nix" ]; then
     if [ -n "$ROOTFS_DISK" ]; then
@@ -107,7 +107,7 @@ mkdir -p "$ROOTFS_PATH/nix/var/nix/userpool"
 mkdir -p "$ROOTFS_PATH/nix/var/log/nix/drvs"
 
 # ── Step 3: LXC container configuration ──────────────────────────────────────
-echo "[3/9] Creating LXC container configuration..."
+echo "[3/10] Creating LXC container configuration..."
 mkdir -p "$LXC_CONFIG_PATH"
 if [ -n "$LOCAL_FILES" ] && [ -f "$LOCAL_FILES/lxc-container.conf" ]; then
     cp "$LOCAL_FILES/lxc-container.conf" "$LXC_CONFIG_PATH/config"
@@ -118,7 +118,7 @@ else
 fi
 
 # ── Step 4: Mount hook script ─────────────────────────────────────────────────
-echo "[4/9] Creating mount hook script..."
+echo "[4/10] Creating mount hook script..."
 if [ -n "$LOCAL_FILES" ] && [ -f "$LOCAL_FILES/mount-hook.sh" ]; then
     cp "$LOCAL_FILES/mount-hook.sh" "$LXC_CONFIG_PATH/mount-hook.sh"
     echo "  Using local mount hook"
@@ -129,7 +129,7 @@ fi
 chmod +x "$LXC_CONFIG_PATH/mount-hook.sh"
 
 # ── Step 5: Systemd device-wait service ───────────────────────────────────────
-echo "[5/9] Creating systemd service to wait for devices..."
+echo "[5/10] Creating systemd service to wait for devices..."
 if [ -n "$SKIP_SYSTEMD" ]; then
     echo "  Skipped (NIXLXC_SKIP_SYSTEMD set)"
 else
@@ -145,7 +145,7 @@ else
 fi
 
 # ── Step 6: Disable host getty on tty7 ────────────────────────────────────────
-echo "[6/9] Disabling host getty on tty7..."
+echo "[6/10] Disabling host getty on tty7..."
 if [ -n "$SKIP_SYSTEMD" ]; then
     echo "  Skipped (NIXLXC_SKIP_SYSTEMD set)"
 else
@@ -157,7 +157,7 @@ fi
 # ── Step 7: Allow unprivileged user namespaces ───────────────────────────────
 # Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor by default.
 # The Nix sandbox inside the LXC container requires user namespaces to function.
-echo "[7/9] Allowing unprivileged user namespaces..."
+echo "[7/10] Allowing unprivileged user namespaces..."
 if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
     sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 > /dev/null
     mkdir -p /etc/sysctl.d
@@ -167,8 +167,19 @@ else
     echo "  Not needed (AppArmor userns restriction not present)"
 fi
 
-# ── Step 8: Start container ──────────────────────────────────────────────────
-echo "[8/9] Starting NixOS container..."
+# ── Step 8: Prevent needrestart from restarting LXC services ─────────────────
+# When unattended-upgrades updates core libraries (e.g. libgcc-s1, libstdc++6),
+# needrestart detects that LXC services are using outdated binaries and restarts
+# them. This kills the running container without a clean shutdown.
+echo "[8/10] Configuring needrestart to skip LXC services..."
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/no-lxc-restart.conf <<'EOF'
+$nrconf{override_rc}{qr(^lxc)} = 0;
+EOF
+echo "  Configured needrestart to never restart lxc* services"
+
+# ── Step 9: Start container ──────────────────────────────────────────────────
+echo "[9/10] Starting NixOS container..."
 
 # Ensure /dev/tty7 exists on the host for container passthrough
 if [ ! -e /dev/tty7 ]; then
@@ -199,8 +210,8 @@ if [ "$READY" -ne 1 ]; then
     exit 1
 fi
 
-# ── Step 9: Apply NixOS configuration ────────────────────────────────────────
-echo "[9/9] Applying NixOS configuration..."
+# ── Step 10: Apply NixOS configuration ───────────────────────────────────────
+echo "[10/10] Applying NixOS configuration..."
 if [ -n "$SKIP_NIXOS_REBUILD" ]; then
     echo "  Skipped (NIXLXC_SKIP_NIXOS_REBUILD set)"
 else

@@ -485,7 +485,9 @@ let
     fi
 
     mkdir -p $out
-    cp ubuntu-lxc.qcow2 $out/
+    # Convert to a standalone qcow2 (no backing file, no sparse holes) so that
+    # Nix can copy/hash the output without lseek failures on some filesystems.
+    qemu-img convert -f qcow2 -O qcow2 ubuntu-lxc.qcow2 $out/ubuntu-lxc.qcow2
     cp build.log $out/
   '';
 
